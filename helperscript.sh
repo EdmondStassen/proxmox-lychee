@@ -1,17 +1,12 @@
 #!/usr/bin/env bash
 # Proxmox helper script voor Lychee (Lychee-Docker in een LXC met Docker)
-# Gebruik: bash lychee-lxc.sh
-#
-# Dit script:
-#  - Maakt een nieuwe Debian LXC aan
-#  - Installeert Docker + docker compose in de container
-#  - Haalt docker-compose.yml + .env.example uit Lychee-Docker repo
-#  - Start Lychee op poort 80 in de container
+# Gebruik op de Proxmox-node:
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/EdmondStassen/proxmox-lychee/refs/heads/main/helperscript.sh)"
 
 set -euo pipefail
 
 APP_NAME="Lychee"
-DEBIAN_TEMPLATE="debian-12-standard_12.7-1_amd64.tar.zst"  # template naam uit pveam
+DEBIAN_TEMPLATE="debian-12-standard_12.7-1_amd64.tar.zst"  # pveam template
 DISK_SIZE_GB=20
 MEMORY_MB=2048
 SWAP_MB=512
@@ -36,43 +31,51 @@ if ! command -v pct >/dev/null 2>&1; then
   exit 1
 fi
 
-# Volgende vrije CT ID
 echo "- Bepaal volgende vrije CT ID..."
 CTID="$(pvesh get /cluster/nextid)"
 echo "  Gebruik CTID: ${CTID}"
 
-# Kies een storage voor rootfs (eerste rootdir storage)
+# Storage kiezen zoals het framework dat ook doet:
+# - TEMPLATE_STORAGE: storage met content 'vztmpl'
+# - ROOTFS_STORAGE: storage met content 'rootdir'
+if ! pvesm status -content vztmpl >/dev/null 2>&1; then
+  echo "Geen storage gevonden met content type 'vztmpl' (templates). Controleer je storage config." >&2
+  exit 1
+fi
+
 if ! pvesm status -content rootdir >/dev/null 2>&1; then
   echo "Geen storage gevonden met content type 'rootdir'. Controleer je storage config." >&2
   exit 1
 fi
 
-STORAGE="$(pvesm status -content rootdir | awk 'NR==2 {print $1}')"
-if [[ -z "${STORAGE}" ]]; then
-  echo "Kon geen geschikte rootdir storage vinden." >&2
+TEMPLATE_STORAGE="$(pvesm status -content vztmpl | awk 'NR==2 {print $1}')"
+ROOTFS_STORAGE="$(pvesm status -content rootdir | awk 'NR==2 {print $1}')"
+
+if [[ -z "${TEMPLATE_STORAGE}" || -z "${ROOTFS_STORAGE}" ]]; then
+  echo "Kon geen geschikte template- of rootdir-storage vinden." >&2
   exit 1
 fi
-echo "  Gebruik storage: ${STORAGE}"
 
-# Controleren of template al aanwezig is, zo niet: downloaden
+echo "  Gebruik template storage: ${TEMPLATE_STORAGE}"
+echo "  Gebruik rootfs storage:   ${ROOTFS_STORAGE}"
+
 echo "- Controleren op Debian template (${DEBIAN_TEMPLATE})..."
-if ! pveam list "${STORAGE}" | grep -q "${DEBIAN_TEMPLATE}"; then
-  echo "  Template niet gevonden op ${STORAGE}, download nu..."
+if ! pveam list "${TEMPLATE_STORAGE}" | grep -q "${DEBIAN_TEMPLATE}"; then
+  echo "  Template niet gevonden op ${TEMPLATE_STORAGE}, download nu..."
   pveam update
-  pveam download "${STORAGE}" "${DEBIAN_TEMPLATE}"
+  pveam download "${TEMPLATE_STORAGE}" "${DEBIAN_TEMPLATE}"
 else
-  echo "  Template al aanwezig."
+  echo "  Template al aanwezig op ${TEMPLATE_STORAGE}."
 fi
 
-# LXC aanmaken
 echo "- Maak LXC container ${CTID} aan..."
 pct create "${CTID}" \
-  "${STORAGE}:vztmpl/${DEBIAN_TEMPLATE}" \
+  "${TEMPLATE_STORAGE}:vztmpl/${DEBIAN_TEMPLATE}" \
   --hostname lychee \
   --cores "${CORES}" \
   --memory "${MEMORY_MB}" \
   --swap "${SWAP_MB}" \
-  --rootfs "${STORAGE}:${DISK_SIZE_GB}" \
+  --rootfs "${ROOTFS_STORAGE}:${DISK_SIZE_GB}" \
   --net0 "name=eth0,bridge=${BRIDGE},ip=dhcp" \
   --unprivileged 1 \
   --features nesting=1 \
@@ -82,11 +85,10 @@ pct create "${CTID}" \
 echo "- Start container ${CTID}..."
 pct start "${CTID}"
 
-# Wachten op IP
 echo "- Wachten tot container een IP-adres heeft..."
+IP=""
 for i in {1..30}; do
-  IP="$(pct exec "${CTID}" -- hostname -I 2>/dev/null | awk '{print $1}') " || true
-  IP="${IP%% *}"
+  IP="$(pct exec "${CTID}" -- hostname -I 2>/dev/null | awk '{print $1}')" || true
   if [[ -n "${IP}" ]]; then
     break
   fi
@@ -112,7 +114,6 @@ pct exec "${CTID}" -- bash -c '
     apt-transport-https \
     software-properties-common
 
-  # Docker repo toevoegen
   install -m 0755 -d /etc/apt/keyrings
   curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
   chmod a+r /etc/apt/keyrings/docker.gpg
@@ -142,15 +143,12 @@ pct exec "${CTID}" -- bash -c '
   mkdir -p /opt/lychee
   cd /opt/lychee
 
-  # docker-compose.yml + .env voorbeeld ophalen
   curl -fsSL https://raw.githubusercontent.com/LycheeOrg/Lychee-Docker/master/docker-compose.yml -o docker-compose.yml
   curl -fsSL https://raw.githubusercontent.com/LycheeOrg/Lychee-Docker/master/.env.example -o .env
 
-  # Tijdzone eventueel aanpassen (voorbeeld: Europe/Amsterdam)
   sed -i "s/^TIMEZONE=.*/TIMEZONE=Europe\/Amsterdam/" .env || true
   sed -i "s/^PHP_TZ=.*/PHP_TZ=Europe\/Amsterdam/" .env || true
 
-  # Stack starten
   docker compose pull
   docker compose up -d
 '
@@ -162,11 +160,7 @@ echo "Container IP: ${IP}"
 echo "Lychee zou bereikbaar moeten zijn op:"
 echo "  http://${IP}/"
 echo
-echo "Configuratie & data in de container:"
-echo "  /opt/lychee    -> docker-compose stack"
-echo "  uploads/config etc. zoals gedefinieerd in docker-compose.yml"
-echo
-echo "Wil je later opnieuw starten / beheren?"
+echo "Beheer later:"
 echo "  pct enter ${CTID}"
 echo "  cd /opt/lychee"
 echo "  docker compose ps"
