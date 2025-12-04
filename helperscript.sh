@@ -108,6 +108,14 @@ pct create "${CTID}" \
   --ostype debian \
   --password ""
 
+# Docker + recente CVE fix: AppArmor work-around voor Docker in LXC
+CONF="/etc/pve/lxc/${CTID}.conf"
+echo "- Pas LXC AppArmor-config aan voor Docker work-around..."
+{
+  echo "lxc.apparmor.profile: unconfined"
+  echo "lxc.mount.entry: /dev/null sys/module/apparmor/parameters/enabled none bind 0 0"
+} >> "${CONF}"
+
 echo "- Start container ${CTID}..."
 pct start "${CTID}"
 
@@ -163,7 +171,13 @@ pct exec "${CTID}" -- bash -c '
   systemctl start docker
 '
 
-echo "- Download Lychee-Docker stack in de container..."
+# Sterk random DB-wachtwoord genereren op de host
+DB_PASSWORD="$(tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24 || true)"
+if [[ -z "${DB_PASSWORD}" ]]; then
+  DB_PASSWORD="ChangeMe$(date +%s)"
+fi
+
+echo "- Download Lychee-Docker stack in de container en stel DB_PASSWORD in..."
 pct exec "${CTID}" -- bash -c '
   set -e
   mkdir -p /opt/lychee
@@ -174,7 +188,20 @@ pct exec "${CTID}" -- bash -c '
 
   sed -i "s/^TIMEZONE=.*/TIMEZONE=Europe\/Amsterdam/" .env || true
   sed -i "s/^PHP_TZ=.*/PHP_TZ=Europe\/Amsterdam/" .env || true
+'  # einde eerste pct exec
 
+# DB_PASSWORD in .env injecteren (gebruik env in de container)
+pct exec "${CTID}" -- env DB_PASSWORD="${DB_PASSWORD}" bash -c '
+  set -e
+  cd /opt/lychee
+
+  if grep -q "^DB_PASSWORD=" .env; then
+    sed -i "s/^DB_PASSWORD=.*/DB_PASSWORD=${DB_PASSWORD}/" .env
+  else
+    echo "DB_PASSWORD=${DB_PASSWORD}" >> .env
+  fi
+
+  # Stack starten
   docker compose pull
   docker compose up -d
 '
@@ -185,6 +212,11 @@ echo
 echo "Container IP: ${IP}"
 echo "Lychee zou bereikbaar moeten zijn op:"
 echo "  http://${IP}/"
+echo
+echo "MySQL DB-gebruiker: lychee"
+echo "MySQL DB-naam:      lychee"
+echo "MySQL DB-wachtwoord: ${DB_PASSWORD}"
+echo "(Deze staat ook in /opt/lychee/.env in de container.)"
 echo
 echo "Beheer later:"
 echo "  pct enter ${CTID}"
