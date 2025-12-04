@@ -1,2 +1,2 @@
 
-bash -c "$(curl -fsSL https://github.com/EdmondStassen/proxmox-lychee/blob/main/helperscript.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/EdmondStassen/proxmox-lychee/refs/heads/main/helperscript.sh)"
