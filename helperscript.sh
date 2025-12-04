@@ -6,7 +6,6 @@
 set -euo pipefail
 
 APP_NAME="Lychee"
-DEBIAN_TEMPLATE="debian-12-standard_12.7-1_amd64.tar.zst"  # pveam template
 DISK_SIZE_GB=20
 MEMORY_MB=2048
 SWAP_MB=512
@@ -35,9 +34,7 @@ echo "- Bepaal volgende vrije CT ID..."
 CTID="$(pvesh get /cluster/nextid)"
 echo "  Gebruik CTID: ${CTID}"
 
-# Storage kiezen zoals het framework dat ook doet:
-# - TEMPLATE_STORAGE: storage met content 'vztmpl'
-# - ROOTFS_STORAGE: storage met content 'rootdir'
+# Storage kiezen: template vs rootfs
 if ! pvesm status -content vztmpl >/dev/null 2>&1; then
   echo "Geen storage gevonden met content type 'vztmpl' (templates). Controleer je storage config." >&2
   exit 1
@@ -59,8 +56,35 @@ fi
 echo "  Gebruik template storage: ${TEMPLATE_STORAGE}"
 echo "  Gebruik rootfs storage:   ${ROOTFS_STORAGE}"
 
-echo "- Controleren op Debian template (${DEBIAN_TEMPLATE})..."
-if ! pveam list "${TEMPLATE_STORAGE}" | grep -q "${DEBIAN_TEMPLATE}"; then
+echo "- Zoeken naar een geschikte Debian 12 template..."
+# Laat gebruiker eventueel DEBIAN_TEMPLATE overriden via env var:
+DEBIAN_TEMPLATE="${DEBIAN_TEMPLATE:-}"
+
+if [[ -z "${DEBIAN_TEMPLATE}" ]]; then
+  # Probeer eerst een bekende naam
+  DEFAULT_NAME="debian-12-standard_12.7-1_amd64.tar.zst"
+  if pveam available | awk '{print $2}' | grep -qx "${DEFAULT_NAME}"; then
+    DEBIAN_TEMPLATE="${DEFAULT_NAME}"
+  else
+    # Pak eerste best passende debian-12-standard template
+    DEBIAN_TEMPLATE="$(
+      pveam available \
+        | awk '/debian-12-standard_.*amd64\.tar\.zst/ {print $2; exit}'
+    )"
+  fi
+fi
+
+if [[ -z "${DEBIAN_TEMPLATE}" ]]; then
+  echo "Kon geen Debian 12 template vinden in 'pveam available'." >&2
+  echo "Controleer met:  pveam available | grep debian-12-standard" >&2
+  echo "En probeer eventueel met: DEBIAN_TEMPLATE=naam.tar.zst bash helperscript.sh" >&2
+  exit 1
+fi
+
+echo "  Gekozen Debian template: ${DEBIAN_TEMPLATE}"
+
+echo "- Controleren of Debian template al op ${TEMPLATE_STORAGE} staat..."
+if ! pveam list "${TEMPLATE_STORAGE}" | awk '{print $2}' | grep -qx "${DEBIAN_TEMPLATE}"; then
   echo "  Template niet gevonden op ${TEMPLATE_STORAGE}, download nu..."
   pveam update
   pveam download "${TEMPLATE_STORAGE}" "${DEBIAN_TEMPLATE}"
